@@ -47,6 +47,48 @@ def offset_inverse(anchors, offset_preds):
     return box_center_to_corner(c_pred)
 
 
+# Non-Maximum Suppression
+def nms(boxes, scores, iou_threshold):
+    B = torch.argsort(scores, dim=-1, descending=True)
+    keep = []
+    while B.numel() > 0:
+        i = B[0]
+        keep.append(i)
+        if B.numel() == 1: break
+        iou = calc_box_iou(boxes[i, :].reshape(-1, 4), boxes[B[1:], :].reshape(-1, 4)).reshape(-1)
+        inds = torch.nonzero(iou <= iou_threshold).reshape(-1)
+        B = B[inds + 1]
+    return torch.tensor(keep, device=boxes.device)
+
+
+#
+def multibox_detection(cls_probs, offset_preds, anchors, nms_threshold=0.5, pos_threshold=0.009999999):
+    device, batch_size = cls_probs.device, cls_probs.shape[0]
+    anchors = anchors.squeeze(0)
+    num_classes, num_anchors = cls_probs.shape[1], cls_probs.shape[2]
+    out = []
+    for i in range(batch_size):
+        cls_prob, offset_pred = cls_probs[i], offset_preds[i].reshape(-1, 4)
+        conf, class_id = torch.max(cls_prob[1:], 0)
+        predicted_bb = offset_inverse(anchors, offset_pred)
+        keep = nms(predicted_bb, conf, nms_threshold)
+        all_idx = torch.arange(num_anchors, dtype=torch.long, device=device)
+        combined = torch.cat((keep, all_idx))
+        uniques, counts = combined.unique(return_counts=True)
+        non_keep = uniques[counts == 1]
+        all_id_sorted = torch.cat((keep, non_keep))
+        class_id[non_keep] = -1
+        class_id = class_id[all_id_sorted]
+        conf, predicted_bb = conf[all_id_sorted], predicted_bb[all_id_sorted]
+        # pos_threshold, non-background
+        below_min_idx = (conf < pos_threshold)
+        class_id[below_min_idx] = -1
+        conf[below_min_idx] = 1 - conf[below_min_idx]
+        pred_info = torch.cat((class_id.unsqueeze(1), conf.unsqueeze(1), predicted_bb), dim=1)
+        out.append(pred_info)
+    return torch.stack(out)
+
+
 # ['s=0.5, r=1', 's=0.25, r=1', 's=0.5, r=2']
 # based on scales and ratios
 def get_scales_ratios_desc(scales, ratios):
@@ -97,6 +139,7 @@ def multibox_prior(data, scales, ratios):
     output = out_grid + anchor_manipulations
     # for w*h=960*540 image, return anchor boxes: [30*16,4]
     return output.unsqueeze(0)
+
 
 # width * height
 def calc_box_area(boxes):
@@ -164,13 +207,13 @@ def offset_boxes(anchors, assigned_bb, eps=1e-6):
 
 # ground truth annotation notate anchor box
 # @anchors:[1, in_height*in_width, 4], 4:[xmin,ymin, xmax,ymax]
-# @labels:[1, label_amoun, 6], 6:[xmin,ymin, xmax,ymax, main_class,sub_class]
+# @labels:[[label_amoun, 6]], 6:[xmin,ymin, xmax,ymax, main_class,sub_class]
 def multibox_target(anchors, labels):
-    batch_size, anchors = labels.shape[0], anchors.squeeze(0)
+    batch_size, anchors = len(labels), anchors.squeeze(0)
     batch_offset, batch_mask, batch_class_labels = [], [], []
     device, num_anchors = anchors.device, anchors.shape[0]
     for i in range(batch_size):
-        label = labels[i, :, :]
+        label = labels[i]
         anchors_bbox_map = assign_anchor_to_bbox(label[:, 0:4], anchors, device)
         # >=0: 1; else: 0, [480,4]. only matched rows would be [1,1,1,1]
         bbox_mask = ((anchors_bbox_map >= 0).float().unsqueeze(-1)).repeat(1, 4)
@@ -213,71 +256,75 @@ def load_annotations(annotation_path):
             parts = line.strip().split(',')
             x, y, w, h = map(int, parts[:4])
             main_class_id, sub_class_id = map(int, (parts[4:6]))
-            boxes.append([x, y, w, h, main_class_id, sub_class_id])
+            feature7, feature8 = map(int, (parts[6:8]))
+            boxes.append([x, y, w, h, main_class_id, sub_class_id, feature7, feature8])
     return torch.tensor(boxes)
 
 
 # ================ Run the demo ================
-path = '../../task1/trainset'
-file_name = '0000002_00005_d_0000014'
-image_name = file_name + '.jpg'
-image_path = os.path.join(path + '/images', image_name)
-image = Image.open(image_path)
-width, height = image.size
-print(width, height)
+def test():
+    path = '../../task1/trainset'
+    file_name = '0000002_00005_d_0000014'
+    image_name = file_name + '.jpg'
+    image_path = os.path.join(path + '/images', image_name)
+    image = Image.open(image_path)
+    width, height = image.size
+    print(width, height)
 
-# generate predicted boxes
-shrink_ratio=48
-X = torch.rand(size=(1, 3, height // shrink_ratio, width // shrink_ratio))
-# eg:0.02*0.02* 300*300=36 pixels
-scales = [0.06]
-# eg:w/h=1
-ratios = [1, 2, 0.3]
-anchor_boxes = multibox_prior(X, scales=scales, ratios=ratios)
-boxes_per_pixel = len(scales) + len(ratios) - 1
+    # generate predicted boxes
+    shrink_ratio = 48
+    X = torch.rand(size=(1, 3, height // shrink_ratio, width // shrink_ratio))
+    # eg:0.02*0.02* 300*300=36 pixels
+    scales = [0.06]
+    # eg:w/h=1
+    ratios = [1, 2, 0.3]
+    anchor_boxes = multibox_prior(X, scales=scales, ratios=ratios)
+    boxes_per_pixel = len(scales) + len(ratios) - 1
 
-# get annotated anchor_boxes / get labels
-annotation_name = file_name + '.txt'
-annotation_path = os.path.join(path + '/annotations', annotation_name)
-annotated_boxes = load_annotations(annotation_path)
-normed_annotated_boxes = normalize_annotations(annotated_boxes, width, height)
-labels = normed_annotated_boxes.unsqueeze(0)
+    # get annotated anchor_boxes / get labels
+    annotation_name = file_name + '.txt'
+    annotation_path = os.path.join(path + '/annotations', annotation_name)
+    annotated_boxes = load_annotations(annotation_path)
+    normed_annotated_boxes = normalize_annotations(annotated_boxes, width, height)
+    # simulate 1 batch
+    labels = [normed_annotated_boxes]
 
-# calculate: offset and expand rate, matched rows, main_class
-(bbox_offset, bbox_mask, class_labels) = multibox_target(anchor_boxes, labels)
+    # calculate: offset and expand rate, matched rows, main_class
+    (bbox_offset, bbox_mask, class_labels) = multibox_target(anchor_boxes, labels)
 
-# decode positive predictions
-bbox_offset = bbox_offset[0]
-bbox_mask = bbox_mask[0]
-class_labels = class_labels[0]
-# remove non-matched
-offset_preds = bbox_offset.reshape(-1, 4) * bbox_mask.reshape(-1, 4)
-# index of matched
-positive_indices = class_labels > 0
+    # decode positive predictions
+    bbox_offset = bbox_offset[0]
+    bbox_mask = bbox_mask[0]
+    class_labels = class_labels[0]
+    # remove non-matched
+    offset_preds = bbox_offset.reshape(-1, 4) * bbox_mask.reshape(-1, 4)
+    # index of matched
+    positive_indices = class_labels > 0
 
-# apply offset on anchor boxes
-# pred_boxes = anchor_boxes.squeeze(0)
-pred_boxes = anchor_boxes.squeeze(0)[positive_indices]
-# pred_boxes = offset_inverse(anchor_boxes.squeeze(0), offset_preds)[positive_indices]
+    # apply offset on anchor boxes
+    # pred_boxes = anchor_boxes.squeeze(0)
+    # pred_boxes = anchor_boxes.squeeze(0)[positive_indices]
+    pred_boxes = offset_inverse(anchor_boxes.squeeze(0), offset_preds)[positive_indices]
 
-# normalized to real pixels
-pred_boxes_pixel = pred_boxes * torch.tensor([width, height, width, height])
+    # normalized to real pixels
+    pred_boxes_pixel = pred_boxes * torch.tensor([width, height, width, height])
 
-# plot
-dpi = 150
-fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
-ax.imshow(image, interpolation='none')
-for bbox in pred_boxes_pixel:
-    bbox = bbox.detach().numpy()
-    rect=patches.Rectangle(
-        # [x1, y1, x2, y2] to (x1, y1, width, height)
-        xy=(bbox[0], bbox[1]),
-        width=bbox[2] - bbox[0],
-        height=bbox[3] - bbox[1],
-        fill=False,
-        edgecolor='cyan',
-        linewidth=0.5
-    )
-    ax.add_patch(rect)
-plt.show()
+    # plot
+    dpi = 150
+    fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax.imshow(image, interpolation='none')
+    for bbox in pred_boxes_pixel:
+        bbox = bbox.detach().numpy()
+        rect = patches.Rectangle(
+            # [x1, y1, x2, y2] to (x1, y1, width, height)
+            xy=(bbox[0], bbox[1]),
+            width=bbox[2] - bbox[0],
+            height=bbox[3] - bbox[1],
+            fill=False,
+            edgecolor='cyan',
+            linewidth=0.5
+        )
+        ax.add_patch(rect)
+    plt.show()
 
+# test()

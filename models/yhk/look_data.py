@@ -48,6 +48,11 @@ def show_image_with_boxes(image_path, annotation_path):
     plt.axis('off')
     plt.show()
 
+# loop through all images
+# for filename in os.listdir('./images'):
+#     if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')):
+#         file_name = filename.split('.')[0]
+# print(file_name)
 
 
 path = '../../task1/trainset'
