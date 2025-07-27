@@ -46,10 +46,12 @@ class Animator:
         self.ax.autoscale_view()
         plt.pause(0.001)
 
-def train():
-    batch_size = 2
-    num_epochs = 5
 
+def train():
+    # 32
+    batch_size = 2
+    # 20
+    num_epochs = 5
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = TinySSD(num_classes=10).to(device)
@@ -73,21 +75,20 @@ def train():
 
     def calc_loss(cls_preds, cls_labels, bbox_preds, bbox_labels, bbox_masks):
         batch_size, num_classes = cls_preds.shape[0], cls_preds.shape[2]
-        cls = cls_loss(cls_preds.reshape(-1, num_classes),
-                       cls_labels.reshape(-1)).reshape(batch_size, -1).mean(dim=1)
-        bbox = bbox_loss(bbox_preds * bbox_masks,
-                         bbox_labels * bbox_masks).mean(dim=1)
+        cls = cls_loss(cls_preds.reshape(-1, num_classes), cls_labels.reshape(-1)).reshape(batch_size, -1).mean(dim=1)
+        bbox = bbox_loss(bbox_preds * bbox_masks, bbox_labels * bbox_masks).mean(dim=1)
         return cls + bbox
 
+    # class error
     def cls_eval(cls_preds, cls_labels):
-        return float((cls_preds.argmax(dim=-1).type(
-            cls_labels.dtype) == cls_labels).sum())
+        return float((cls_preds.argmax(dim=-1).type(cls_labels.dtype) == cls_labels).sum())
 
+    # bbox mae = Bounding Box Mean Absolute Error
     def bbox_eval(bbox_preds, bbox_labels, bbox_masks):
         return float((torch.abs((bbox_labels - bbox_preds) * bbox_masks)).sum())
 
-    animator = Animator(xlabel='epoch', xlim=[1, num_epochs],
-                        legend=['class error', 'bbox mae'])
+    # bbox mae = Bounding Box Mean Absolute Error
+    animator = Animator(xlabel='epoch', xlim=[1, num_epochs], legend=['class error', 'bbox mae'])
     net = net.to(device)
     start_time = 0
     for epoch in range(num_epochs):

@@ -13,7 +13,6 @@ def validate(net, device):
     X = torchvision.io.read_image('../../task1/trainset/images/0000002_00005_d_0000014.jpg').unsqueeze(0).float()
     img = X.squeeze(0).permute(1, 2, 0).long()
 
-
     def predict(X):
         net.eval()
         anchors, cls_preds, bbox_preds = net(X.to(device))
@@ -24,27 +23,22 @@ def validate(net, device):
 
     output = predict(X)
 
-
     def show_bboxes(ax, bboxes, labels=None, colors=None):
         for i, bbox in enumerate(bboxes):
             xmin, ymin, xmax, ymax = [float(x) for x in bbox]
             width, height = xmax - xmin, ymax - ymin
             color = colors[i] if colors else 'red'
-            rect = patches.Rectangle((xmin, ymin), width, height, fill=False, edgecolor=color, linewidth=2)
+            rect = patches.Rectangle((xmin, ymin), width, height, fill=False, edgecolor=color, linewidth=0.8)
             ax.add_patch(rect)
-            if labels and labels[i]:
-                ax.text(xmin, ymin,
-                        labels[i],
-                        bbox=dict(facecolor=color, alpha=0.5),
-                        fontsize=10, color='white')
-
+            # if labels and labels[i]:
+            #     ax.text(xmin, ymin, labels[i], bbox=dict(facecolor=color, alpha=0.5), fontsize=10, color='white')
 
     def display(img, output, threshold=0.5):
-        plt.figure(figsize=(5, 5))
-        fig = plt.imshow(img)
-        ax = plt.gca()
+        height, width = img.shape[0:2]
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+        ax.imshow(img, interpolation='none')
 
-        h, w = img.shape[0:2]
         bboxes = []
         labels = []
 
@@ -52,7 +46,7 @@ def validate(net, device):
             score = float(row[1])
             if score < threshold:
                 continue
-            bbox = row[2:6] * torch.tensor([w, h, w, h], device=row.device)
+            bbox = row[2:6] * torch.tensor([width, height, width, height], device=row.device)
             bboxes.append(bbox)
             labels.append(f'{score:.2f}')
 
